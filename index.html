@@ -70,7 +70,7 @@
     <header>
       <div>
         <h1>Roblox: Search user & list friends</h1>
-        <div class="meta">Enter a username to fetch their friends (names + profile pictures). Uses Roblox public APIs.</div>
+        <div class="meta">Enter a username to fetch their friends (names + profile pictures). Uses Roblox public APIs via proxy.</div>
       </div>
     </header>
 
@@ -90,7 +90,8 @@
   </main>
 
   <script>
-    // Helper to create elements quickly
+    const proxyBase = 'https://your-proxy.onrender.com/api/'; // <-- Update with your Render proxy URL
+
     const $ = (sel) => document.querySelector(sel);
     const statusEl = $('#status');
     const resultsEl = $('#results');
@@ -109,8 +110,6 @@
     }
 
     clearBtn.addEventListener('click', ()=>{ input.value=''; clearResults(); input.focus(); });
-
-    // Main search flow
     searchBtn.addEventListener('click', ()=>doSearch());
     input.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') doSearch(); });
 
@@ -120,7 +119,6 @@
       const username = input.value.trim();
       if(!username){ setStatus('Please enter a username.', true); return; }
 
-      // Abort any previous ongoing fetches
       if(abortController){ abortController.abort(); }
       abortController = new AbortController();
       const signal = abortController.signal;
@@ -130,9 +128,7 @@
       searchBtn.disabled = true;
 
       try{
-        // 1) Get user id from usernames endpoint (supports multiple, we supply one)
-        const usersUrl = `https://users.roblox.com/v1/usernames/users?usernames=${encodeURIComponent(username)}`;
-        const userResp = await fetch(usersUrl, { signal });
+        const userResp = await fetch(proxyBase + `users.roblox.com/v1/usernames/users?usernames=${encodeURIComponent(username)}`, { signal });
         if(!userResp.ok) throw new Error(`User lookup failed: ${userResp.status}`);
         const userJson = await userResp.json();
         const userData = (userJson.data && userJson.data[0]) || null;
@@ -140,14 +136,13 @@
         const userId = userData.id;
         setStatus(`Found user: ${userData.name} (ID ${userId}). Fetching friends...`);
 
-        // 2) Fetch friends pages (friends API supports pagination). We'll loop until cursor is null or user aborts.
         let cursor = null;
         let allFriends = [];
         let page = 0;
         do{
           page++;
           setStatus(`Fetching friends — page ${page}...`);
-          const friendsUrl = new URL(`https://friends.roblox.com/v1/users/${userId}/friends`);
+          const friendsUrl = new URL(proxyBase + `friends.roblox.com/v1/users/${userId}/friends`);
           friendsUrl.searchParams.set('limit','100');
           if(cursor) friendsUrl.searchParams.set('cursor', cursor);
 
@@ -157,13 +152,10 @@
           const friends = frJson.data || [];
           allFriends = allFriends.concat(friends);
 
-          // Render incremental results so user sees progress
           renderFriends(allFriends, userId);
 
           cursor = frJson.nextPageCursor || frJson.nextPageCursor === 0 ? frJson.nextPageCursor : null;
-          // Stop if no cursor or length less than limit
           if(!cursor) break;
-          // small delay to be polite (and allow abort to propagate)
           await new Promise(r => setTimeout(r, 200));
         } while(cursor && !signal.aborted);
 
@@ -171,91 +163,59 @@
         else setStatus(`Loaded ${allFriends.length} friend${allFriends.length===1?'':'s'}.`);
 
       }catch(err){
-        if(err.name === 'AbortError'){
-          setStatus('Request cancelled.');
-        } else {
-          console.error(err);
-          setStatus('Error: '+ (err.message || err), true);
-        }
+        if(err.name === 'AbortError') setStatus('Request cancelled.');
+        else { console.error(err); setStatus('Error: '+ (err.message || err), true); }
       } finally {
         searchBtn.disabled = false;
       }
     }
 
-    // Render function that requests thumbnails for friend IDs and displays cards
     async function renderFriends(friendsArray, mainUserId){
-      // Clear and show header
       resultsEl.innerHTML = '';
-
-      const header = document.createElement('div');
-      header.className = 'small';
-      header.textContent = `Showing ${friendsArray.length} friend${friendsArray.length===1?'':'s'}`;
+      const header = document.createElement('div'); header.className = 'small'; header.textContent = `Showing ${friendsArray.length} friend${friendsArray.length===1?'':'s'}`;
       resultsEl.appendChild(header);
 
       if(friendsArray.length === 0){
-        const notice = document.createElement('div');
-        notice.className = 'notice center';
-        notice.textContent = 'No friends found.';
+        const notice = document.createElement('div'); notice.className = 'notice center'; notice.textContent = 'No friends found.';
         resultsEl.appendChild(notice);
         return;
       }
 
-      // Create grid
-      const grid = document.createElement('div');
-      grid.className = 'grid';
-      resultsEl.appendChild(grid);
-
-      // Batch fetch thumbnails for up to 100 friend IDs at a time
+      const grid = document.createElement('div'); grid.className = 'grid'; resultsEl.appendChild(grid);
       const ids = friendsArray.map(f => f.id).join(',');
       let thumbMap = {};
       try{
-        const thumbUrl = `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${ids}&size=150x150&format=Png&isCircular=false`;
-        const tResp = await fetch(thumbUrl);
+        const tResp = await fetch(proxyBase + `thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${ids}&size=150x150&format=Png&isCircular=false`);
         if(tResp.ok){
           const tJson = await tResp.json();
           (tJson.data || []).forEach(item => { thumbMap[item.targetId] = item.imageUrl; });
         }
       }catch(e){ console.warn('Thumbnail fetch failed', e); }
 
-      // Build cards
       for(const friend of friendsArray){
-        const card = document.createElement('article');
-        card.className = 'card';
-
+        const card = document.createElement('article'); card.className = 'card';
         const av = document.createElement('div'); av.className = 'avatar';
-        const img = document.createElement('img');
-        img.alt = `${friend.name}'s avatar`;
-        img.loading = 'lazy';
+        const img = document.createElement('img'); img.alt = `${friend.name}'s avatar`; img.loading='lazy';
         img.src = thumbMap[friend.id] || `https://www.roblox.com/headshot-thumbnail/image?userId=${friend.id}&width=150&height=150&format=png`;
         av.appendChild(img);
 
         const info = document.createElement('div');
-        const name = document.createElement('div'); name.className = 'name'; name.textContent = friend.name;
-        const uname = document.createElement('div'); uname.className = 'username'; uname.textContent = `ID: ${friend.id}`;
-        const link = document.createElement('a'); link.className = 'profile-link'; link.href = `https://www.roblox.com/users/${friend.id}/profile`;
-        link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Open profile';
+        const name = document.createElement('div'); name.className='name'; name.textContent=friend.name;
+        const uname = document.createElement('div'); uname.className='username'; uname.textContent=`ID: ${friend.id}`;
+        const link = document.createElement('a'); link.className='profile-link'; link.href=`https://www.roblox.com/users/${friend.id}/profile`; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent='Open profile';
 
-        info.appendChild(name);
-        info.appendChild(uname);
-        info.appendChild(link);
-
-        card.appendChild(av);
-        card.appendChild(info);
+        info.appendChild(name); info.appendChild(uname); info.appendChild(link);
+        card.appendChild(av); card.appendChild(info);
         grid.appendChild(card);
       }
 
-      // Add a control to open user's main profile
       const controls = document.createElement('div'); controls.className='controls';
-      const openProfile = document.createElement('a');
-      openProfile.className = 'profile-link';
-      openProfile.textContent = 'Open main user profile';
-      openProfile.href = `https://www.roblox.com/users/${mainUserId}/profile`;
-      openProfile.target = '_blank';
+      const openProfile = document.createElement('a'); openProfile.className='profile-link'; openProfile.textContent='Open main user profile';
+      openProfile.href=`https://www.roblox.com/users/${mainUserId}/profile`; openProfile.target='_blank';
       controls.appendChild(openProfile);
       resultsEl.appendChild(controls);
     }
 
-    // Small UX: autofocus the input
     input.focus();
   </script>
 </body>
